@@ -1,6 +1,6 @@
 # LedgerStream architecture
 
-LedgerStream treats accounting history as an immutable event stream. Commands are validated against reconstructed state, and accepted decisions append new events rather than mutate old records.
+LedgerStream treats accounting history as an immutable event stream. Commands are decided against reconstructed state and accepted decisions append new events rather than mutate old records.
 
 ## Command flow
 
@@ -8,7 +8,7 @@ LedgerStream treats accounting history as an immutable event stream. Commands ar
 PostEntry / ReverseEntry
         |
         v
-load event stream + version
+load PostgreSQL event stream + version
         |
         v
 replay LedgerAggregate
@@ -21,28 +21,54 @@ Decision(events | idempotent no-op)
         |
         v
 appendAtomically(expectedVersion, events, outbox)
+        |
+        v
+one PostgreSQL transaction
 ```
 
 ## Double-entry rule
 
-Balancing is checked independently per `CurrencyCode`. Every posting has a positive decimal amount and an explicit `DEBIT` or `CREDIT` side. A multi-currency journal entry therefore needs balanced legs for each currency it contains.
+Balancing is checked independently per `CurrencyCode`. Every posting has a positive decimal amount and an explicit `DEBIT` or `CREDIT` side. Multi-currency journal entries therefore require balanced legs for every currency they contain.
 
-## Idempotency model
+## Idempotency
 
-The aggregate reconstructs idempotency state from each `JournalEntryPosted` event. Identical retries append nothing and return the existing entry ID. A changed payload under an existing key is rejected.
+`JournalEntryPosted` persists the request fingerprint. Replay reconstructs the idempotency map from durable history.
 
-## Reversal model
+- exact retry: return the original entry ID and append zero events
+- changed payload under an existing key: reject
+- PostgreSQL uniqueness on `(ledger_id, idempotency_key)`: defense in depth against adapter/application defects
 
-A reversal never mutates an original event. It appends a new `JournalEntry` with every posting side inverted and a `reversalOf` reference to the original entry ID.
+## Reversals
+
+A reversal appends a new journal entry with inverted posting sides and a `reversalOf` reference. Original history remains untouched.
 
 ## Optimistic concurrency
 
-The store loads `(version, events)` and requires append against that exact version. A stale writer receives `ConcurrencyException`. The application deliberately does not hide that conflict with an unsafe implicit retry.
+Each ledger has a monotonically increasing stream version. The PostgreSQL adapter advances the version only when the stored version equals the caller's expected version. A stale writer receives `ConcurrencyException`.
 
-## Transactional outbox boundary
+The application does not silently retry changed decisions. Callers may retry the original idempotent command, causing a fresh replay and decision.
 
-Every appended ledger event has one `OutboxMessage`. Durable adapters must persist the event stream update and outbox messages in the same database transaction.
+## PostgreSQL transaction boundary
 
-## Durability boundary
+One `appendAtomically` call performs:
 
-Current state is process-local. It demonstrates accounting and concurrency semantics, not crash durability. PostgreSQL, Flyway, recovery tests, and Testcontainers are the next milestone.
+1. ensure stream row exists;
+2. compare-and-advance stream version;
+3. insert event metadata;
+4. insert ordered postings;
+5. insert one outbox row per event;
+6. commit.
+
+Any SQL failure rolls back every step. Integration tests induce an outbox primary-key violation after earlier writes and verify no partial version/event/posting change survives.
+
+## Transactional outbox
+
+Unpublished rows are claimed with `FOR UPDATE SKIP LOCKED`, bounded batch sizes, and leases capped at one hour. Claims increment attempt count. `markPublished` and `release` succeed only for the worker that owns the active claim.
+
+## Schema evolution
+
+Flyway owns the database schema. Migrations live under `src/main/resources/db/migration` and are exercised against a real PostgreSQL container in CI.
+
+## Service boundary
+
+v0.1.0 intentionally has no HTTP server. Authentication, authorization, rate limits, API semantics, telemetry, and service-container packaging remain a later milestone so the persistence/accounting core can be proven first.

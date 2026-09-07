@@ -2,33 +2,65 @@
 
 [![CI](https://github.com/mkarson1997/karzoun-ledgerstream/actions/workflows/ci.yml/badge.svg)](https://github.com/mkarson1997/karzoun-ledgerstream/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/mkarson1997/karzoun-ledgerstream/actions/workflows/codeql.yml/badge.svg)](https://github.com/mkarson1997/karzoun-ledgerstream/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/mkarson1997/karzoun-ledgerstream)](https://github.com/mkarson1997/karzoun-ledgerstream/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-LedgerStream is a Java 21 double-entry ledger engine focused on accounting invariants, append-only history, idempotent command handling, optimistic concurrency, and deterministic reconstruction.
+LedgerStream is a Java 21 event-sourced double-entry ledger engine focused on accounting invariants, durable PostgreSQL history, idempotent posting, optimistic concurrency, deterministic reconstruction, and transactional outbox delivery.
 
-## v0.1 core scope
+## v0.1.0 scope
 
-The current foundation deliberately separates domain semantics from database/framework integration. It provides immutable journal entries, per-currency debit/credit balancing using `BigDecimal`, payload-bound idempotency, append-only reversals, deterministic replay, optimistic concurrency, an atomic event+outbox persistence boundary, accounting-period policy, and deterministic tests.
+Implemented and tested now:
 
-The in-memory store is a contract/reference adapter for the first milestone. It is **not durable storage**. PostgreSQL, Flyway migrations, transactional row locking, and Testcontainers are the next persistence milestone.
+- immutable double-entry journal entries
+- per-currency debit/credit balancing with `BigDecimal` only
+- payload-bound idempotency: exact retry is a no-op, changed payload under the same key is rejected
+- deterministic entry identity for retried commands
+- append-only reversals instead of historical mutation
+- deterministic aggregate reconstruction from persisted event history
+- accounting-period policy boundary
+- PostgreSQL event store managed by Flyway
+- SQL expected-version optimistic concurrency
+- event + postings + outbox committed in one database transaction
+- unique event/entry/idempotency constraints as defense in depth
+- durable outbox leases with bounded claims and `FOR UPDATE SKIP LOCKED`
+- restart reconstruction, rollback, outbox ownership, concurrency, accounting, and idempotency tests
+- Java 21/25 CI, PostgreSQL Testcontainers integration, and CodeQL Java/Kotlin
 
-## Accounting invariants
+## Accounting invariant
 
-Every represented currency balances independently: `sum(debits, currency) == sum(credits, currency)`. Amounts are positive decimal values and never binary floating point.
+Every represented currency balances independently:
+
+```text
+sum(debits, currency) == sum(credits, currency)
+```
+
+A USD debit cannot be balanced by an EUR credit. Posting amounts are positive decimal values and are never represented with binary floating point.
 
 ## Idempotency
 
-Same key + same payload is a no-op replay returning the original entry ID. Same key + changed payload is rejected. The mapping is reconstructed from event history rather than a process-local cache.
+The idempotency key is bound to a deterministic request fingerprint reconstructed from the event stream:
+
+1. first request appends one journal event;
+2. exact retry returns the original entry ID and appends nothing;
+3. reusing the same key with changed payload fails.
+
+The PostgreSQL schema also enforces `(ledger_id, idempotency_key)` uniqueness as defense in depth.
 
 ## Reversals
 
-Historical entries are never edited or deleted. A reversal appends a new balanced entry with inverted posting sides and a `reversalOf` reference.
+Historical entries are never edited or deleted. A reversal appends a new balanced journal entry with inverted posting sides and a `reversalOf` reference to the original.
 
-## Optimistic concurrency and outbox
+## PostgreSQL durability
 
-`EventStore.appendAtomically(...)` requires an expected stream version and receives ledger events and outbox messages in one call. Durable adapters must commit both sets or neither set.
+`PostgresEventStore.appendAtomically(...)` advances the stream version, inserts the event, inserts every posting, and inserts the corresponding outbox message inside one SQL transaction. A stale expected version fails without a partial write.
 
-## Build
+The Testcontainers suite proves reconstruction through a fresh store instance and forces a database constraint failure after event/posting insertion to verify the transaction rolls back the stream version, event, postings, and outbox together.
+
+## Transactional outbox
+
+`PostgresOutboxRepository` claims unpublished messages using bounded leases and PostgreSQL `FOR UPDATE SKIP LOCKED`. Active claims are disjoint across workers. Publishing and releasing require the current worker to own the lease.
+
+## Build and test
 
 Requires JDK 21+ and Maven 3.9+.
 
@@ -36,13 +68,31 @@ Requires JDK 21+ and Maven 3.9+.
 mvn -B -ntp verify
 ```
 
-CI verifies Java 21 and Java 25.
+Run the PostgreSQL Testcontainers suite:
+
+```bash
+mvn -B -ntp -DskipITs=false verify
+```
+
+## Distribution
+
+`v0.1.0` publishes:
+
+- `ledgerstream-0.1.0.jar`
+- `ledgerstream-0.1.0-sources.jar`
+- CycloneDX JSON SBOM
+- `SHA256SUMS.txt`
+- GitHub Maven package
+
+No container image is published in v0.1.0 because LedgerStream is currently an engine/library, not a network service. A container becomes meaningful only when a real service runtime exists.
+
+## Architecture
 
 See [`docs/architecture.md`](docs/architecture.md) and [`ROADMAP.md`](ROADMAP.md).
 
 ## Non-claims
 
-LedgerStream does not currently claim to be banking-grade, certified accounting software, or suitable for regulated production use.
+LedgerStream does not claim to be banking-grade, certified accounting software, or suitable for regulated production use. Those labels require operational, compliance, security, recovery, and jurisdiction-specific evidence beyond this software implementation.
 
 ## License
 
