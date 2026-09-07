@@ -1,0 +1,18 @@
+name: Feature request
+description: Propose a focused LedgerStream capability
+title: "feat: "
+body:
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case
+      description: What ledger/accounting problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants and failure behavior
+      description: Which accounting, idempotency, concurrency, or audit guarantees must remain true?
+    validations:
+      required: true
