@@ -7,6 +7,38 @@
 
 LedgerStream is a Java 21 event-sourced double-entry ledger engine focused on accounting invariants, durable PostgreSQL history, idempotent posting, optimistic concurrency, deterministic reconstruction, and transactional outbox delivery.
 
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    C[Post / Reverse command] --> R[Replay ledger event stream]
+    R --> D[Decision + accounting invariants]
+    D -->|new event| TX[Atomic PostgreSQL append]
+    D -->|exact retry| N[Idempotent no-op]
+    TX --> E[(Events)]
+    TX --> P[(Postings)]
+    TX --> O[(Transactional outbox)]
+    O --> W[Lease-based publishers]
+```
+
+The core separates decision logic from persistence: state is reconstructed from immutable history, commands are validated against accounting and idempotency rules, then accepted events, postings and outbox records cross one database transaction boundary.
+
+## Engineering proof points
+
+| Area | What the repository demonstrates |
+| --- | --- |
+| Accounting correctness | Per-currency double-entry balancing with `BigDecimal`, positive amounts and explicit debit/credit sides. |
+| Event sourcing | Immutable history, deterministic replay and append-only reversals instead of historical mutation. |
+| Idempotency | Payload-bound idempotency where exact retries return the original result and changed reuse is rejected. |
+| Concurrency | Expected-version optimistic concurrency enforced in PostgreSQL. |
+| Transactional integrity | Stream version, event, postings and outbox commit or roll back together. |
+| Reliable delivery | Bounded outbox claims with leases, ownership checks and `FOR UPDATE SKIP LOCKED`. |
+| Integration evidence | Testcontainers exercises restart reconstruction, rollback, ownership, concurrency and accounting behavior against real PostgreSQL. |
+| Compatibility | CI verifies Java 21 and Java 25. |
+| Security analysis | CodeQL Java/Kotlin runs with `security-extended` queries. |
+| Supply-chain security | Third-party GitHub Actions are pinned to reviewed immutable commit SHAs. |
+| Distribution | Versioned JAR + sources, CycloneDX SBOM, SHA-256 manifest and GitHub Maven package. |
+
 ## v0.1.0 scope
 
 Implemented and tested now:
@@ -85,6 +117,15 @@ mvn -B -ntp -DskipITs=false verify
 - GitHub Maven package
 
 No container image is published in v0.1.0 because LedgerStream is currently an engine/library, not a network service. A container becomes meaningful only when a real service runtime exists.
+
+## Security and delivery controls
+
+- Java 21 and Java 25 verification run in CI
+- PostgreSQL behavior is exercised with Testcontainers
+- CodeQL analyzes Java/Kotlin with `security-extended`
+- third-party GitHub Actions are pinned to reviewed immutable commit SHAs
+- releases include source artifacts, an SBOM and SHA-256 checksums
+- package publishing is tag-driven rather than coupled to ordinary branch pushes
 
 ## Architecture
 
